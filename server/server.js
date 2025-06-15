@@ -2,44 +2,74 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
+const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server);
 
-// تخزين المستخدمين المنتظرين
-let waitingUsers = [];
+// إعدادات CORS آمنة
+const io = socketIo(server, {
+  cors: {
+    origin: "https://video-chat-gprc.onrender.com", // استبدل هذا برابط موقعك
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'], // تفعيل كلا النوعين
+  pingTimeout: 60000,
+  pingInterval: 25000
+});
 
-// Serve static files
+// Middleware
+app.use(cors({
+  origin: "https://video-chat-gprc.onrender.com",
+  credentials: true
+}));
 app.use(express.static(path.join(__dirname, '../public')));
 
-// Socket.io logic
+// تحسين إدارة الجلسات
+const waitingUsers = [];
+const activePairs = new Map();
+
 io.on('connection', (socket) => {
-    console.log('مستخدم جديد متصل:', socket.id);
+  console.log('مستخدم متصل:', socket.id);
 
-    // البحث عن شريك
-    socket.on('find-partner', () => {
-        if (waitingUsers.length > 0) {
-            const partner = waitingUsers.pop();
-            socket.emit('partner-found', partner.id);
-            partner.emit('partner-found', socket.id);
-        } else {
-            waitingUsers.push(socket);
-        }
-    });
+  socket.on('find-partner', () => {
+    if (waitingUsers.length > 0) {
+      const partner = waitingUsers.pop();
+      const roomId = `${socket.id}-${partner.id}`;
+      
+      socket.join(roomId);
+      partner.join(roomId);
+      
+      activePairs.set(socket.id, partner.id);
+      activePairs.set(partner.id, socket.id);
+      
+      io.to(roomId).emit('partner-found', { roomId });
+    } else {
+      waitingUsers.push(socket);
+    }
+  });
 
-    // إرسال إشارة WebRTC
-    socket.on('signal', (data) => {
-        io.to(data.target).emit('signal', data);
-    });
+  socket.on('signal', (data) => {
+    const partnerId = activePairs.get(socket.id);
+    if (partnerId) {
+      socket.to(partnerId).emit('signal', data);
+    }
+  });
 
-    // عند الانفصال
-    socket.on('disconnect', () => {
-        waitingUsers = waitingUsers.filter(user => user.id !== socket.id);
-    });
+  socket.on('disconnect', () => {
+    const partnerId = activePairs.get(socket.id);
+    if (partnerId) {
+      socket.to(partnerId).emit('partner-disconnected');
+      activePairs.delete(partnerId);
+    }
+    activePairs.delete(socket.id);
+    
+    waitingUsers = waitingUsers.filter(user => user.id !== socket.id);
+  });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`الخادم يعمل على http://localhost:${PORT}`);
+  console.log(`الخادم يعمل على البورت ${PORT}`);
 });
